@@ -2,262 +2,189 @@
 import base64
 import binascii
 import os
-import sqlite3
-from typing import Any
+import time
+from collections import defaultdict, deque
+from threading import Lock
 
-import jwt
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from .database import (
-    initialize_database,
-    verify_user_quota,
-    increment_user_usage,
-)
 from .core_wasm import execute_low_level_parse
 from .constraint_engine import map_unstructured_to_schema
-
-
-DB_PATH = os.getenv(
-    "DATABASE_PATH",
-    "/var/data/inbound_arbitrage.db",
+from .database import (
+    complete_daily_slot,
+    get_daily_usage,
+    initialize_database,
+    release_daily_slot,
+    reserve_daily_slot,
 )
-JWT_SECRET = os.getenv("JWT_SECRET", "")
-MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
 
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET must be configured")
+
+DB_PATH = os.getenv("DATABASE_PATH", "data/inbound_arbitrage.db")
+MAX_FILE_BYTES = 2 * 1024 * 1024
+DAILY_REQUEST_LIMIT = max(1, int(os.getenv("DAILY_REQUEST_LIMIT", "100")))
+PER_CLIENT_PER_MINUTE = max(
+    1, int(os.getenv("PER_CLIENT_PER_MINUTE", "5"))
+)
 
 app = FastAPI(
     title="SolveEase Inbound Arbitrage Scanner",
-    description="1G-5G structured ingestion and processing gateway",
-    version="1.1.0",
+    description="A text document extraction API.",
+    version="1.0.0",
 )
 
-# Configure exact frontend origins, separated by commas.
-allowed_origins = [
+initialize_database(DB_PATH)
+
+cors_origins = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", "").split(",")
     if origin.strip()
 ]
 
-if allowed_origins:
+if cors_origins:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
-
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class TaskPayload(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    body: str = Field(
-        ...,
-        min_length=1,
-        description="UTF-8 text or base64-encoded bytes",
-    )
-    is_base64: bool = Field(
+    body: str = Field(min_length=1, max_length=3_000_000)
+    is_base64_encoded: bool = Field(
         default=False,
         alias="isBase64Encoded",
     )
 
 
-def authenticated_user_id(
-    credentials: HTTPAuthorizationCredentials | None = Depends(
-        bearer_scheme
-    ),
-) -> str:
-    """Validate a signed HS256 JWT and extract its subject."""
+# In-memory throttle: not a durable quota or a distributed rate limiter.
+_request_times = defaultdict(deque)
+_rate_limit_lock = Lock()
 
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
+def _check_rate_limit(client_key: str) -> None:
+    now = time.monotonic()
+    cutoff = now - 60
+
+    with _rate_limit_lock:
+        recent = _request_times[client_key]
+
+        while recent and recent[0] < cutoff:
+            recent.popleft()
+
+        if len(recent) >= PER_CLIENT_PER_MINUTE:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many requests. Please wait before trying again.",
+            )
+
+        recent.append(now)
+
+
+def _decode_request_body(payload: TaskPayload) -> bytes:
     try:
-        claims = jwt.decode(
-            credentials.credentials,
-            JWT_SECRET,
-            algorithms=["HS256"],
-            options={"require": ["sub", "exp"]},
-        )
-        user_id = claims.get("sub")
-
-        if not isinstance(user_id, str) or not user_id.strip():
-            raise jwt.InvalidTokenError("Invalid subject")
-
-        return user_id.strip()
-
-    except jwt.InvalidTokenError:
+        if payload.is_base64_encoded:
+            raw = base64.b64decode(payload.body, validate=True)
+        else:
+            raw = payload.body.encode("utf-8")
+    except (binascii.Error, ValueError, UnicodeEncodeError) as exc:
         raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=400,
+            detail="The submitted content is not valid input.",
+        ) from exc
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="Input is empty.")
+
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Input exceeds the 2 MiB limit.",
         )
+
+    return raw
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "SolveEase Inbound Arbitrage Scanner",
+        "health": "/health",
+        "process_endpoint": "/api/v1/process-task",
+    }
 
 
 @app.get("/health")
-def operational_health_check() -> dict[str, str]:
-    """Basic liveness check; does not claim inference is operational."""
+def health():
     return {
         "status": "healthy",
         "service": "SolveEase Inbound Arbitrage Scanner",
+        "inference_configured": bool(
+            os.getenv("INFERENCE_PROVIDER_API_KEY", "").strip()
+        ),
+    }
+
+
+@app.get("/api/v1/usage")
+def usage():
+    current = get_daily_usage(DB_PATH)
+    return {
+        "daily_used": current["used"],
+        "daily_reserved": current["reserved"],
+        "daily_limit": DAILY_REQUEST_LIMIT,
     }
 
 
 @app.post("/api/v1/process-task")
-def handle_inbound_task_operation(
-    payload: TaskPayload,
-    user_id: str = Depends(authenticated_user_id),
-) -> dict[str, Any]:
-    """Authenticate, reserve quota, process input, and return extraction."""
+def process_task(payload: TaskPayload, request: Request):
+    client_host = request.client.host if request.client else "unknown"
+    _check_rate_limit(client_host)
 
-    if not payload.body.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Empty payload",
-        )
+    raw = _decode_request_body(payload)
 
-    # Bound encoded input before decoding.
-    if len(payload.body) > MAX_PAYLOAD_BYTES * 2:
+    try:
+        cleaned_text = execute_low_level_parse(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not reserve_daily_slot(DB_PATH, DAILY_REQUEST_LIMIT):
         raise HTTPException(
-            status_code=413,
-            detail="Payload exceeds the size limit",
+            status_code=429,
+            detail="The service has reached its daily processing limit.",
         )
 
     try:
-        if payload.is_base64:
-            raw_bytes = base64.b64decode(
-                payload.body,
-                validate=True,
-            )
-        else:
-            raw_bytes = payload.body.encode("utf-8")
-
-    except (binascii.Error, ValueError, UnicodeEncodeError):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid payload encoding",
-        )
-
-    if not raw_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail="Decoded payload is empty",
-        )
-
-    if len(raw_bytes) > MAX_PAYLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail="Payload exceeds the 2 MiB limit",
-        )
-
-    conn = None
-    reserved = False
-
-    try:
-        # Use a separate connection for each request.
-        conn = initialize_database(DB_PATH)
-
-        quota = verify_user_quota(conn, user_id)
-
-        if quota is None:
-            raise HTTPException(
-                status_code=403,
-                detail="Account is not provisioned",
-            )
-
-        # Atomically reserve one unit before inference.
-        if not increment_user_usage(conn, user_id):
-            raise HTTPException(
-                status_code=429,
-                detail="Monthly usage allowance reached",
-            )
-
-        reserved = True
-
-        cleaned_text = execute_low_level_parse(raw_bytes)
-
-        if not cleaned_text:
-            raise HTTPException(
-                status_code=400,
-                detail="Payload contains no usable text",
-            )
-
         result = map_unstructured_to_schema(cleaned_text)
+        complete_daily_slot(DB_PATH)
+    except Exception as exc:
+        try:
+            release_daily_slot(DB_PATH)
+        except Exception:
+            # Keep the original processing failure as the primary error.
+            pass
 
-        current_quota = verify_user_quota(conn, user_id)
-
-        if current_quota is None:
-            raise RuntimeError("Account missing after reservation")
-
-        tier, usage, limit = current_quota
-        reserved = False
-
-        return {
-            "status": "success",
-            "account_tier": tier,
-            "monthly_consumption": usage,
-            "monthly_allowance": limit,
-            "payload": result,
-        }
-
-    except HTTPException:
-        # HTTP errors are intentional and should retain their status.
-        if reserved and conn is not None:
-            _refund_reservation(conn, user_id)
-            reserved = False
-        raise
-
-    except Exception:
-        if reserved and conn is not None:
-            _refund_reservation(conn, user_id)
-            reserved = False
-
-        # Do not send internal exception details to clients.
+        # Log details server-side if needed; never return provider credentials
+        # or raw exception details to the browser.
         raise HTTPException(
             status_code=502,
-            detail="Processing provider or internal service failed",
-        )
+            detail=(
+                "Extraction failed. Check the server configuration "
+                "and provider logs, then try again."
+            ),
+        ) from exc
 
-    finally:
-        if conn is not None:
-            conn.close()
+    current = get_daily_usage(DB_PATH)
 
-
-def _refund_reservation(
-    conn: sqlite3.Connection,
-    user_id: str,
-) -> None:
-    """
-    Best-effort refund for a failed request in the current UTC month.
-    A reservation ledger is recommended for stronger accounting.
-    """
-    from datetime import datetime, timezone
-
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
-
-    try:
-        with conn:
-            conn.execute(
-                """
-                UPDATE users
-                SET usage_count = usage_count - 1
-                WHERE user_id = ?
-                  AND usage_month = ?
-                  AND usage_count > 0
-                """,
-                (user_id, month),
-            )
-    except sqlite3.Error:
-        # Log privately in production; never expose database details.
-        pass
+    return {
+        "status": "success",
+        "payload": result,
+        "usage": {
+            "daily_used": current["used"],
+            "daily_limit": DAILY_REQUEST_LIMIT,
+        },
+    }
