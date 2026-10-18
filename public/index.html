@@ -1,0 +1,365 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>Free Document Data Extractor | SolveEase</title>
+  <meta name="description" content="Extract structured data from text, CSV and JSON documents. Preview actual results and export JSON or CSV without creating an account.">
+  <link rel="stylesheet" href="https://cdn.tailwindcss.com">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .drop-active { border-color: #818cf8; background: #1e1b4b; }
+    .focus-ring:focus-visible { outline: 3px solid #818cf8; outline-offset: 3px; }
+    pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 font-sans text-slate-100">
+<header class="px-5 py-12 text-center">
+  <div class="mx-auto max-w-3xl">
+    <span class="rounded-full border border-indigo-400/20 bg-indigo-400/10 px-4 py-2 text-xs font-bold uppercase tracking-widest text-indigo-300">SolveEase · Data tools</span>
+    <h1 class="mt-6 text-3xl font-extrabold tracking-tight sm:text-5xl">Convert Documents into Structured Data</h1>
+    <p class="mx-auto mt-4 max-w-2xl text-slate-400">Process a text-based document, inspect the real extraction response, and export the returned data. No email registration required.</p>
+  </div>
+</header>
+
+<main class="mx-auto max-w-3xl px-4 pb-16 sm:px-6">
+  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <h2 class="text-xl font-bold">Extraction workspace</h2>
+      <span class="rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-300">Maximum 2 MiB</span>
+    </div>
+
+    <div id="drop-zone" tabindex="0" role="button" aria-label="Choose or drop a file" class="focus-ring mt-6 cursor-pointer rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950 p-8 text-center transition sm:p-12">
+      <input id="file-input" class="hidden" type="file" accept=".txt,.csv,.json,.log">
+      <div class="text-4xl text-indigo-300" aria-hidden="true">⇧</div>
+      <h3 class="mt-4 text-lg font-bold">Drop a file here</h3>
+      <p class="mt-2 text-sm text-slate-400">Or tap to browse · TXT, CSV, JSON or LOG</p>
+      <p id="file-label" class="mt-3 break-all text-sm text-indigo-300">No file selected</p>
+    </div>
+
+    <label for="pasted-text" class="mt-6 block text-sm font-semibold">Or paste text directly</label>
+    <textarea id="pasted-text" rows="5" maxlength="2097152" class="focus-ring mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm" placeholder="Paste document text, CSV rows or JSON here..."></textarea>
+    <p class="mt-2 text-xs leading-5 text-slate-500">Do not upload passwords, payment-card details or sensitive personal information. PDF files are not supported by this version.</p>
+
+    <div class="mt-6 flex flex-col gap-3 sm:flex-row">
+      <button id="process" class="focus-ring flex-1 rounded-xl bg-indigo-600 px-5 py-3 font-bold hover:bg-indigo-500 disabled:opacity-50">Process data</button>
+      <button id="clear" class="focus-ring rounded-xl border border-slate-700 px-5 py-3 font-semibold hover:bg-slate-800">Clear</button>
+    </div>
+    <p id="status" role="status" aria-live="polite" class="mt-4 hidden rounded-xl border p-4 text-sm"></p>
+  </section>
+
+  <section id="results" class="mt-8 hidden rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+    <h2 class="text-xl font-bold">Extraction result</h2>
+    <p class="mt-1 text-sm text-slate-400">Review the actual response before relying on it.</p>
+    <div id="fields" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
+    <h3 class="mt-6 font-semibold">Full response</h3>
+    <pre id="output" class="mt-3 max-h-96 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-4 text-xs leading-6 text-emerald-300"></pre>
+    <div class="mt-5 flex flex-col gap-3 sm:flex-row">
+      <button id="json-export" class="focus-ring flex-1 rounded-xl bg-emerald-700 px-4 py-3 font-bold hover:bg-emerald-600">Export JSON</button>
+      <button id="csv-export" class="focus-ring flex-1 rounded-xl border border-slate-700 px-4 py-3 font-bold hover:bg-slate-800">Export CSV</button>
+    </div>
+    <p class="mt-4 text-xs leading-5 text-slate-500">Extracted values are not independently verified financial or accounting results.</p>
+  </section>
+
+  <section class="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+    <h2 class="font-bold">How it works</h2>
+    <p class="mt-2 text-sm leading-6 text-slate-400">Your browser sends the chosen text to the configured API. The backend processes the request using its configured extraction provider. You can inspect and download the response. Provider costs and service limits may apply.</p>
+  </section>
+</main>
+
+<footer class="border-t border-slate-800 px-5 py-7 text-center text-xs text-slate-500">© 2026 SolveEase · Document extraction utility</footer>
+
+<script>
+"use strict";
+
+// Replace this with your deployed Render service origin.
+const BACKEND_API_URL = "https://YOUR-RENDER-SERVICE.onrender.com";
+const ENDPOINT = "/api/v1/process-task";
+const MAX_BYTES = 2 * 1024 * 1024;
+
+const $ = id => document.getElementById(id);
+const zone = $("drop-zone");
+const input = $("file-input");
+const pasted = $("pasted-text");
+const fileLabel = $("file-label");
+const processButton = $("process");
+
+let selectedFile = null;
+let lastResult = null;
+let busy = false;
+
+function status(message, kind = "info") {
+  const el = $("status");
+  el.className = "mt-4 rounded-xl border p-4 text-sm";
+  const styles = {
+    info: "border-sky-500/30 bg-sky-500/10 text-sky-200",
+    success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+    error: "border-rose-500/30 bg-rose-500/10 text-rose-200"
+  };
+  el.classList.add(...styles[kind].split(" "));
+  el.textContent = message;
+}
+
+function hideStatus() { $("status").classList.add("hidden"); }
+
+function clearResults() {
+  lastResult = null;
+  $("results").classList.add("hidden");
+  $("fields").replaceChildren();
+  $("output").textContent = "";
+}
+
+function setFile(file) {
+  selectedFile = file;
+  fileLabel.textContent = file
+    ? `${file.name} · ${(file.size / 1024).toFixed(1)} KB`
+    : "No file selected";
+  if (file) pasted.value = "";
+}
+
+function checkFile(file) {
+  if (!file) throw new Error("Choose a file or paste text first.");
+  if (file.size === 0) throw new Error("The selected file is empty.");
+  if (file.size > MAX_BYTES) throw new Error("The file exceeds the 2 MiB limit.");
+  if (!/\.(txt|csv|json|log)$/i.test(file.name)) {
+    throw new Error("Use a TXT, CSV, JSON or LOG file.");
+  }
+}
+
+function base64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function showFields(data) {
+  const payload = data.payload ?? data.result ?? data;
+  const entries = [
+    ["Document origin", payload.document_origin],
+    ["Transaction date", payload.transaction_date],
+    ["Calculated net value", payload.calculated_net_value],
+    ["Daily requests used", data.usage?.daily_used],
+    ["Daily limit", data.usage?.daily_limit]
+  ];
+
+  for (const [label, value] of entries) {
+    if (value === undefined || value === null || value === "") continue;
+    const card = document.createElement("div");
+    card.className = "rounded-xl border border-slate-800 bg-slate-950 p-4";
+    const title = document.createElement("p");
+    title.className = "text-xs uppercase tracking-wide text-slate-500";
+    title.textContent = label;
+    const valueNode = document.createElement("p");
+    valueNode.className = "mt-2 break-words text-sm";
+    valueNode.textContent = String(value);
+    card.append(title, valueNode);
+    $("fields").appendChild(card);
+  }
+
+  if (Array.isArray(payload.extracted_metadata_array)) {
+    const card = document.createElement("div");
+    card.className = "rounded-xl border border-slate-800 bg-slate-950 p-4";
+    card.textContent = `Extracted items: ${payload.extracted_metadata_array.length}`;
+    $("fields").appendChild(card);
+  }
+}
+
+async function processData() {
+  if (busy) return;
+  clearResults();
+
+  let body;
+  try {
+    if (pasted.value.trim()) {
+      if (selectedFile) throw new Error("Choose a file or paste text, not both.");
+      const bytes = new TextEncoder().encode(pasted.value);
+      if (bytes.length > MAX_BYTES) throw new Error("Pasted text exceeds 2 MiB.");
+      body = { body: base64(bytes), isBase64Encoded: true };
+    } else {
+      checkFile(selectedFile);
+      body = {
+        body: base64(new Uint8Array(await selectedFile.arrayBuffer())),
+        isBase64Encoded: true
+      };
+    }
+  } catch (error) {
+    status(error.message, "error");
+    return;
+  }
+
+  let endpoint;
+  try {
+    const origin = new URL(BACKEND_API_URL);
+    if (!["https:", "http:"].includes(origin.protocol) ||
+        origin.hostname.startsWith("YOUR-")) throw new Error();
+    endpoint = new URL(ENDPOINT, origin).href;
+  } catch {
+    status("Set BACKEND_API_URL in public/index.html to your real API origin.", "error");
+    return;
+  }
+
+  busy = true;
+  processButton.disabled = true;
+  processButton.textContent = "Processing…";
+  status("Sending document to the extraction service…");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const text = await response.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch { throw new Error(`Unexpected response from service (HTTP ${response.status}).`); }
+
+    if (!response.ok) {
+      throw new Error(
+        typeof data.detail === "string"
+          ? `HTTP ${response.status}: ${data.detail}`
+          : `The service returned HTTP ${response.status}.`
+      );
+    }
+
+    lastResult = data;
+    showFields(data);
+    $("output").textContent = JSON.stringify(data, null, 2);
+    $("results").classList.remove("hidden");
+    status("The API returned a successful response.", "success");
+  } catch (error) {
+    if (error.name === "AbortError") {
+      status("The request timed out. Check the service and try again.", "error");
+    } else if (error instanceof TypeError) {
+      status("Network or CORS failure. Check the API URL, HTTPS and backend CORS settings.", "error");
+    } else {
+      status(error.message || "Processing failed.", "error");
+    }
+  } finally {
+    clearTimeout(timer);
+    busy = false;
+    processButton.disabled = false;
+    processButton.textContent = "Process data";
+  }
+}
+
+function download(name, content, mime) {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function csvCell(value) {
+  let text = value == null ? "" :
+    (typeof value === "object" ? JSON.stringify(value) : String(value));
+  if (/^\s*[=+\-@]/.test(text)) text = "'" + text;
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+function flatten(value, prefix = "", result = {}) {
+  if (Array.isArray(value)) {
+    result[prefix || "items"] = JSON.stringify(value);
+  } else if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (child && typeof child === "object" && !Array.isArray(child)) {
+        flatten(child, path, result);
+      } else {
+        result[path] = Array.isArray(child) ? JSON.stringify(child) : child;
+      }
+    }
+  } else {
+    result[prefix || "value"] = value;
+  }
+  return result;
+}
+
+zone.addEventListener("click", () => input.click());
+zone.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    input.click();
+  }
+});
+input.addEventListener("change", () => {
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    checkFile(file);
+    setFile(file);
+    clearResults();
+    hideStatus();
+  } catch (error) {
+    input.value = "";
+    setFile(null);
+    status(error.message, "error");
+  }
+});
+zone.addEventListener("dragover", e => {
+  e.preventDefault();
+  zone.classList.add("drop-active");
+});
+zone.addEventListener("dragleave", e => {
+  if (!zone.contains(e.relatedTarget)) zone.classList.remove("drop-active");
+});
+zone.addEventListener("drop", e => {
+  e.preventDefault();
+  zone.classList.remove("drop-active");
+  const file = e.dataTransfer?.files?.[0];
+  if (!file) return;
+  try {
+    checkFile(file);
+    setFile(file);
+    input.value = "";
+    clearResults();
+    hideStatus();
+  } catch (error) {
+    setFile(null);
+    status(error.message, "error");
+  }
+});
+pasted.addEventListener("input", () => {
+  if (pasted.value) {
+    setFile(null);
+    input.value = "";
+    clearResults();
+  }
+});
+processButton.addEventListener("click", processData);
+$("clear").addEventListener("click", () => {
+  if (busy) return;
+  input.value = "";
+  pasted.value = "";
+  setFile(null);
+  clearResults();
+  hideStatus();
+});
+$("json-export").addEventListener("click", () => {
+  if (lastResult === null) return status("No result to export.", "error");
+  download("solveease-result.json", JSON.stringify(lastResult, null, 2), "application/json");
+});
+$("csv-export").addEventListener("click", () => {
+  if (lastResult === null) return status("No result to export.", "error");
+  const flat = flatten(lastResult);
+  const keys = Object.keys(flat);
+  const csv = [keys.map(csvCell).join(","), keys.map(k => csvCell(flat[k])).join(",")].join("\r\n");
+  download("solveease-result.csv", "\uFEFF" + csv, "text/csv;charset=utf-8");
+});
+</script>
+</body>
+</html>
