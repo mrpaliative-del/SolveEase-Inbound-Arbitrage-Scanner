@@ -1,0 +1,685 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+
+  <title>Free Document Data Extractor | SolveEase</title>
+  <meta name="description"
+        content="Extract structured data from text, CSV and JSON files. Preview actual processing results and export your data without creating an account on this page.">
+
+  <link rel="canonical" href="https://YOUR-FRONTEND-DOMAIN.example/">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body { min-height: 100vh; }
+    .drop-active {
+      border-color: #818cf8 !important;
+      background: rgba(99, 102, 241, .12) !important;
+    }
+    .focus-ring:focus-visible {
+      outline: 3px solid #818cf8;
+      outline-offset: 3px;
+    }
+    pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100 font-sans">
+  <header class="px-5 py-12 text-center">
+    <div class="mx-auto max-w-3xl">
+      <span class="inline-block rounded-full border border-indigo-400/20
+                   bg-indigo-400/10 px-4 py-2 text-xs font-bold
+                   uppercase tracking-widest text-indigo-300">
+        SolveEase · Inbound Data Tools
+      </span>
+
+      <h1 id="page-title"
+          class="mt-6 text-3xl font-extrabold tracking-tight text-white
+                 sm:text-5xl">
+        Convert Documents into Structured Data
+      </h1>
+
+      <p id="page-description"
+         class="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-400 sm:text-lg">
+        Upload a supported text file, process it through the connected
+        extraction service, inspect the real response and export the results.
+      </p>
+    </div>
+  </header>
+
+  <main class="mx-auto w-full max-w-3xl flex-1 px-4 pb-16 sm:px-6">
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-bold">Data extraction workspace</h2>
+          <p class="mt-1 text-sm text-slate-400">
+            Supported formats: TXT, CSV, JSON and LOG.
+          </p>
+        </div>
+        <span class="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300">
+          Maximum file size: 2 MiB
+        </span>
+      </div>
+
+      <div id="drop-zone"
+           role="button"
+           tabindex="0"
+           aria-label="Choose a file or drop it here"
+           class="focus-ring mt-6 cursor-pointer rounded-2xl border-2
+                  border-dashed border-slate-700 bg-slate-950/50 p-8
+                  text-center transition sm:p-12">
+        <input id="file-input" type="file"
+               accept=".txt,.csv,.json,.log,text/plain,text/csv,application/json"
+               class="hidden">
+
+        <div class="mx-auto flex h-14 w-14 items-center justify-center
+                    rounded-2xl bg-indigo-500/10 text-indigo-300">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="1.7"
+               class="h-8 w-8" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M12 16V4m0 0L7 9m5-5 5 5M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/>
+          </svg>
+        </div>
+
+        <h3 class="mt-5 text-lg font-bold">
+          Drop your file here
+        </h3>
+        <p class="mt-2 text-sm text-slate-400">
+          Or tap to browse your device
+        </p>
+        <p id="selected-file" class="mt-3 break-all text-sm text-indigo-300">
+          No file selected
+        </p>
+      </div>
+
+      <div class="mt-6">
+        <label for="text-input" class="block text-sm font-semibold text-slate-200">
+          Or paste text directly
+        </label>
+        <textarea id="text-input" rows="5" maxlength="2097152"
+                  placeholder="Paste a small text, CSV row, JSON document or statement here..."
+                  class="focus-ring mt-2 w-full rounded-xl border border-slate-700
+                         bg-slate-950 px-4 py-3 text-sm text-white
+                         placeholder:text-slate-600"></textarea>
+        <p class="mt-1 text-xs text-slate-500">
+          Pasting text clears the selected file. Do not submit passwords,
+          payment-card details or other sensitive information.
+        </p>
+      </div>
+
+      <details class="mt-5 rounded-xl border border-slate-800 bg-slate-950 p-4">
+        <summary class="cursor-pointer text-sm font-semibold text-slate-300">
+          API connection settings
+        </summary>
+        <div class="mt-4">
+          <label for="api-token" class="block text-sm font-medium">
+            Access token (only if required by your backend)
+          </label>
+          <input id="api-token" type="password" autocomplete="off"
+                 spellcheck="false"
+                 placeholder="Paste an existing valid bearer token"
+                 class="focus-ring mt-2 w-full rounded-lg border border-slate-700
+                        bg-slate-900 px-3 py-2.5 text-sm">
+          <p class="mt-2 text-xs leading-5 text-slate-500">
+            The token is held in page memory only and is not saved by this
+            page. This interface cannot issue or sign tokens. Never enter
+            your JWT signing secret or inference-provider API key here.
+          </p>
+        </div>
+      </details>
+
+      <div class="mt-6 flex flex-col gap-3 sm:flex-row">
+        <button id="process-button" type="button"
+                class="focus-ring flex-1 rounded-xl bg-indigo-600 px-5 py-3
+                       font-bold text-white transition hover:bg-indigo-500
+                       disabled:cursor-not-allowed disabled:opacity-50">
+          Process data
+        </button>
+        <button id="clear-button" type="button"
+                class="focus-ring rounded-xl border border-slate-700
+                       px-5 py-3 font-semibold text-slate-300
+                       hover:bg-slate-800">
+          Clear
+        </button>
+      </div>
+
+      <div id="status" role="status" aria-live="polite"
+           class="mt-4 hidden rounded-xl border p-4 text-sm"></div>
+    </section>
+
+    <section id="results-section"
+             class="mt-8 hidden rounded-2xl border border-slate-800
+                    bg-slate-900 p-5 sm:p-7">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-bold">Processing result</h2>
+          <p id="result-summary" class="mt-1 text-sm text-slate-400">
+            Actual response from the connected service.
+          </p>
+        </div>
+        <span class="rounded-full border border-emerald-500/20
+                     bg-emerald-500/10 px-3 py-1 text-xs font-semibold
+                     text-emerald-300">
+          Response received
+        </span>
+      </div>
+
+      <div id="result-fields" class="mt-5 grid gap-3 sm:grid-cols-2"></div>
+
+      <div class="mt-6">
+        <h3 class="font-semibold">Raw response</h3>
+        <pre id="raw-result"
+             class="mt-3 max-h-96 overflow-auto rounded-xl border
+                    border-slate-800 bg-slate-950 p-4 text-xs
+                    leading-6 text-emerald-300"></pre>
+      </div>
+
+      <div class="mt-5 flex flex-col gap-3 sm:flex-row">
+        <button id="download-json" type="button"
+                class="focus-ring flex-1 rounded-xl bg-emerald-700 px-4
+                       py-3 font-bold hover:bg-emerald-600">
+          Export JSON
+        </button>
+        <button id="download-csv" type="button"
+                class="focus-ring flex-1 rounded-xl border border-slate-700
+                       px-4 py-3 font-bold hover:bg-slate-800">
+          Export CSV
+        </button>
+      </div>
+
+      <p class="mt-4 text-xs leading-5 text-slate-500">
+        Exports contain the response received from your backend. Extracted
+        values are not independently verified financial or accounting results.
+      </p>
+    </section>
+
+    <section class="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <h2 class="font-bold">What this tool does</h2>
+      <ul class="mt-3 space-y-2 text-sm leading-6 text-slate-400">
+        <li>• Accepts small text-based documents.</li>
+        <li>• Sends the content to your configured processing API.</li>
+        <li>• Displays the service's actual response, including errors.</li>
+        <li>• Lets you export a successful response as JSON or CSV.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="border-t border-slate-800 px-5 py-7 text-center text-xs text-slate-500">
+    © 2026 SolveEase. Data extraction utility.
+    Do not upload sensitive documents. Review extracted data before relying on it.
+  </footer>
+
+  <script>
+    "use strict";
+
+    // Replace this with your actual deployed HTTPS API origin.
+    // Example format: https://your-service.onrender.com
+    const BACKEND_API_URL = "https://YOUR-RENDER-SERVICE.onrender.com";
+    const PROCESS_ENDPOINT = "/api/v1/process-task";
+    const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+    const $ = (id) => document.getElementById(id);
+
+    const dropZone = $("drop-zone");
+    const fileInput = $("file-input");
+    const textInput = $("text-input");
+    const selectedFile = $("selected-file");
+    const processButton = $("process-button");
+    const clearButton = $("clear-button");
+    const statusBox = $("status");
+    const resultsSection = $("results-section");
+    const resultFields = $("result-fields");
+    const rawResult = $("raw-result");
+    const resultSummary = $("result-summary");
+    const apiTokenInput = $("api-token");
+
+    let selectedFileObject = null;
+    let lastSuccessfulResponse = null;
+    let busy = false;
+
+    // Only update the DOM with text; never interpret API output as HTML.
+    function showStatus(message, kind = "info") {
+      statusBox.classList.remove("hidden");
+      statusBox.className = "mt-4 rounded-xl border p-4 text-sm";
+
+      const styles = {
+        info: "border-sky-500/20 bg-sky-500/10 text-sky-200",
+        success: "border-emerald-500/20 bg-emerald-500/10 text-emerald-200",
+        error: "border-rose-500/20 bg-rose-500/10 text-rose-200"
+      };
+
+      statusBox.classList.add(...styles[kind].split(" "));
+      statusBox.textContent = message;
+    }
+
+    function hideResults() {
+      resultsSection.classList.add("hidden");
+      resultFields.replaceChildren();
+      rawResult.textContent = "";
+      lastSuccessfulResponse = null;
+    }
+
+    function updateSelectedFile(file) {
+      selectedFileObject = file || null;
+      selectedFile.textContent = file
+        ? `${file.name} · ${formatBytes(file.size)}`
+        : "No file selected";
+
+      if (file) {
+        textInput.value = "";
+      }
+    }
+
+    function formatBytes(bytes) {
+      return bytes < 1024 * 1024
+        ? `${(bytes / 1024).toFixed(1)} KB`
+        : `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+    }
+
+    function setBusy(value) {
+      busy = value;
+      processButton.disabled = value;
+      processButton.textContent = value ? "Processing…" : "Process data";
+    }
+
+    function getReadableError(data, statusCode) {
+      if (data && typeof data.detail === "string") {
+        return `Request failed (${statusCode}): ${data.detail}`;
+      }
+      if (data && typeof data.message === "string") {
+        return `Request failed (${statusCode}): ${data.message}`;
+      }
+      return `The service returned HTTP ${statusCode}. Check the API logs and configuration.`;
+    }
+
+    function validateFile(file) {
+      if (!file) {
+        throw new Error("Choose a file or paste text first.");
+      }
+
+      if (file.size === 0) {
+        throw new Error("The selected file is empty.");
+      }
+
+      if (file.size > MAX_FILE_BYTES) {
+        throw new Error("This file exceeds the 2 MiB upload limit.");
+      }
+
+      const allowedExtensions = /\.(txt|csv|json|log)$/i;
+      if (!allowedExtensions.test(file.name)) {
+        throw new Error("Unsupported file type. Use TXT, CSV, JSON or LOG.");
+      }
+    }
+
+    function bytesToBase64(bytes) {
+      // Chunk the conversion to avoid overflowing the argument stack.
+      const chunkSize = 0x8000;
+      let binary = "";
+
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        const chunk = bytes.subarray(offset, offset + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+
+      return btoa(binary);
+    }
+
+    async function readFileAsBase64(file) {
+      const buffer = await file.arrayBuffer();
+      return bytesToBase64(new Uint8Array(buffer));
+    }
+
+    function addResultField(label, value) {
+      const card = document.createElement("div");
+      card.className = "rounded-xl border border-slate-800 bg-slate-950 p-4";
+
+      const title = document.createElement("p");
+      title.className = "text-xs font-semibold uppercase tracking-wide text-slate-500";
+      title.textContent = label;
+
+      const content = document.createElement("p");
+      content.className = "mt-2 break-words text-sm text-slate-100";
+      content.textContent = value == null ? "—" :
+        (typeof value === "object" ? JSON.stringify(value) : String(value));
+
+      card.append(title, content);
+      resultFields.appendChild(card);
+    }
+
+    function displayResult(responseData) {
+      lastSuccessfulResponse = responseData;
+      resultsSection.classList.remove("hidden");
+      resultFields.replaceChildren();
+
+      // The backend's precise response schema may evolve, so display known
+      // fields when present and always retain the complete JSON response.
+      const payload = responseData && typeof responseData === "object"
+        ? (responseData.payload ?? responseData.result ?? responseData)
+        : { value: responseData };
+
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const fields = [
+          ["Document origin", payload.document_origin],
+          ["Transaction date", payload.transaction_date],
+          ["Calculated net value", payload.calculated_net_value],
+          ["Account tier", responseData.account_tier],
+          ["Monthly consumption", responseData.monthly_consumption],
+          ["Monthly allowance", responseData.monthly_allowance]
+        ];
+
+        for (const [label, value] of fields) {
+          if (value !== undefined && value !== null && value !== "") {
+            addResultField(label, value);
+          }
+        }
+
+        const items = payload.extracted_metadata_array ??
+                      payload.line_items;
+
+        if (Array.isArray(items)) {
+          addResultField("Extracted item count", items.length);
+        }
+      }
+
+      resultSummary.textContent =
+        "The service returned a successful response. Review it before exporting.";
+      rawResult.textContent = JSON.stringify(responseData, null, 2);
+
+      resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    async function processData() {
+      if (busy) return;
+
+      hideResults();
+
+      let requestBody;
+
+      try {
+        const pastedText = textInput.value;
+        const hasPastedText = pastedText.trim().length > 0;
+
+        if (hasPastedText && selectedFileObject) {
+          throw new Error("Choose either a file or pasted text, not both.");
+        }
+
+        if (hasPastedText) {
+          const byteLength = new TextEncoder().encode(pastedText).length;
+          if (byteLength > MAX_FILE_BYTES) {
+            throw new Error("Pasted text exceeds the 2 MiB limit.");
+          }
+
+          requestBody = {
+            body: bytesToBase64(new TextEncoder().encode(pastedText)),
+            isBase64Encoded: true
+          };
+        } else {
+          validateFile(selectedFileObject);
+          requestBody = {
+            body: await readFileAsBase64(selectedFileObject),
+            isBase64Encoded: true
+          };
+        }
+      } catch (error) {
+        showStatus(error.message || "Unable to prepare the input.", "error");
+        return;
+      }
+
+      let apiUrl;
+      try {
+        const origin = new URL(BACKEND_API_URL);
+        if (!["https:", "http:"].includes(origin.protocol) ||
+            origin.hostname === "YOUR-RENDER-SERVICE.onrender.com") {
+          throw new Error();
+        }
+        apiUrl = new URL(PROCESS_ENDPOINT, origin).toString();
+      } catch {
+        showStatus(
+          "Configure BACKEND_API_URL in the page script with your actual API origin before processing.",
+          "error"
+        );
+        return;
+      }
+
+      setBusy(true);
+      showStatus("Sending the input to the processing service…", "info");
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      try {
+        const headers = { "Content-Type": "application/json" };
+        const token = apiTokenInput.value.trim();
+
+        if (token) {
+          headers.Authorization = `Bearer ${token}`;
+        }
+
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: controller.signal
+        });
+
+        const responseText = await response.text();
+        let data;
+
+        try {
+          data = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          throw new Error(
+            `The service returned a non-JSON response (HTTP ${response.status}).`
+          );
+        }
+
+        if (!response.ok) {
+          throw new Error(getReadableError(data, response.status));
+        }
+
+        displayResult(data);
+        showStatus("Processing completed. The displayed result came from the API.", "success");
+      } catch (error) {
+        if (error.name === "AbortError") {
+          showStatus("The request timed out. Check the service status and try again.", "error");
+        } else if (error instanceof TypeError) {
+          showStatus(
+            "Network request failed. Check the API URL, HTTPS and backend CORS settings.",
+            "error"
+          );
+        } else {
+          showStatus(error.message || "Processing failed.", "error");
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        setBusy(false);
+      }
+    }
+
+    function downloadBlob(filename, content, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function csvCell(value) {
+      const text = value == null
+        ? ""
+        : (typeof value === "object" ? JSON.stringify(value) : String(value));
+
+      // Reduce the risk of spreadsheet formula injection.
+      const safeText = /^[\s]*[=+\-@]/.test(text) ? "'" + text : text;
+      return '"' + safeText.replace(/"/g, '""') + '"';
+    }
+
+    function flattenObject(value, prefix = "", output = {}) {
+      if (Array.isArray(value)) {
+        output[prefix || "items"] = JSON.stringify(value);
+      } else if (value && typeof value === "object") {
+        for (const [key, child] of Object.entries(value)) {
+          const path = prefix ? `${prefix}.${key}` : key;
+          if (child && typeof child === "object" && !Array.isArray(child)) {
+            flattenObject(child, path, output);
+          } else if (Array.isArray(child)) {
+            output[path] = JSON.stringify(child);
+          } else {
+            output[path] = child;
+          }
+        }
+      } else {
+        output[prefix || "value"] = value;
+      }
+
+      return output;
+    }
+
+    function exportCsv() {
+      if (lastSuccessfulResponse === null) {
+        showStatus("There is no successful result to export.", "error");
+        return;
+      }
+
+      const flattened = flattenObject(lastSuccessfulResponse);
+      const keys = Object.keys(flattened);
+      const csv = [
+        keys.map(csvCell).join(","),
+        keys.map(key => csvCell(flattened[key])).join(",")
+      ].join("\r\n");
+
+      downloadBlob("solveease-extraction.csv", "\uFEFF" + csv, "text/csv;charset=utf-8");
+    }
+
+    function clearWorkspace() {
+      if (busy) return;
+
+      fileInput.value = "";
+      textInput.value = "";
+      apiTokenInput.value = "";
+      updateSelectedFile(null);
+      hideResults();
+      statusBox.classList.add("hidden");
+    }
+
+    // Upload and drop interactions.
+    dropZone.addEventListener("click", event => {
+      if (event.target !== fileInput) fileInput.click();
+    });
+
+    dropZone.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        fileInput.click();
+      }
+    });
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+
+      try {
+        validateFile(file);
+        updateSelectedFile(file);
+        hideResults();
+        statusBox.classList.add("hidden");
+      } catch (error) {
+        updateSelectedFile(null);
+        fileInput.value = "";
+        showStatus(error.message, "error");
+      }
+    });
+
+    textInput.addEventListener("input", () => {
+      if (textInput.value.length > 0) {
+        updateSelectedFile(null);
+        fileInput.value = "";
+        hideResults();
+      }
+    });
+
+    dropZone.addEventListener("dragover", event => {
+      event.preventDefault();
+      dropZone.classList.add("drop-active");
+    });
+
+    dropZone.addEventListener("dragleave", event => {
+      if (!dropZone.contains(event.relatedTarget)) {
+        dropZone.classList.remove("drop-active");
+      }
+    });
+
+    dropZone.addEventListener("drop", event => {
+      event.preventDefault();
+      dropZone.classList.remove("drop-active");
+
+      const file = event.dataTransfer && event.dataTransfer.files[0];
+      if (!file) return;
+
+      try {
+        validateFile(file);
+        updateSelectedFile(file);
+        fileInput.value = "";
+        hideResults();
+        statusBox.classList.add("hidden");
+      } catch (error) {
+        updateSelectedFile(null);
+        showStatus(error.message, "error");
+      }
+    });
+
+    processButton.addEventListener("click", processData);
+    clearButton.addEventListener("click", clearWorkspace);
+
+    $("download-json").addEventListener("click", () => {
+      if (lastSuccessfulResponse === null) {
+        showStatus("There is no successful result to export.", "error");
+        return;
+      }
+
+      downloadBlob(
+        "solveease-extraction.json",
+        JSON.stringify(lastSuccessfulResponse, null, 2),
+        "application/json;charset=utf-8"
+      );
+    });
+
+    $("download-csv").addEventListener("click", exportCsv);
+
+    // Basic programmatic SEO: descriptive copy only, never claim that a
+    // route has a feature that the backend does not actually support.
+    const slug = window.location.pathname.split("/").filter(Boolean).pop() || "";
+    const seoRoutes = {
+      "convert-csv-to-json": {
+        title: "Convert CSV Data with SolveEase",
+        description: "Submit CSV text to the connected data extraction service and export its actual response."
+      },
+      "extract-json-data": {
+        title: "Extract JSON Data with SolveEase",
+        description: "Process JSON documents through the connected extraction API and export the returned data."
+      },
+      "parse-text-files": {
+        title: "Parse Text Files with SolveEase",
+        description: "Process supported text files through your configured extraction service."
+      }
+    };
+
+    if (seoRoutes[slug]) {
+      $("page-title").textContent = seoRoutes[slug].title;
+      $("page-description").textContent = seoRoutes[slug].description;
+      document.title = seoRoutes[slug].title;
+    }
+  </script>
+</body>
+</html>
