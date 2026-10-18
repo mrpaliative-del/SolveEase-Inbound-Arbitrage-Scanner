@@ -1,194 +1,105 @@
 
+import os
 import sqlite3
-from typing import Optional, Tuple
+from datetime import datetime, timezone
 
 
-def initialize_database(
-    db_path: str = "inbound_arbitrage.db",
-) -> sqlite3.Connection:
-    """Initialize the 4G relational data layer."""
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
-    conn = sqlite3.connect(
-        db_path,
-        timeout=15,
-        isolation_level="DEFERRED",
-    )
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 15000")
 
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            email TEXT UNIQUE,
-            tier TEXT NOT NULL DEFAULT 'FREE'
-                CHECK (tier IN ('FREE', 'PREMIUM', 'BUSINESS')),
-            monthly_allowance INTEGER NOT NULL DEFAULT 15
-                CHECK (monthly_allowance >= 0),
-            usage_count INTEGER NOT NULL DEFAULT 0
-                CHECK (usage_count >= 0),
-            usage_month TEXT NOT NULL DEFAULT
-                (strftime('%Y-%m', 'now'))
-        );
+def _connect(db_path: str) -> sqlite3.Connection:
+    if db_path != ":memory:":
+        directory = os.path.dirname(os.path.abspath(db_path))
+        os.makedirs(directory, exist_ok=True)
 
-        CREATE TABLE IF NOT EXISTS transaction_queue (
-            task_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            pattern_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'QUEUED'
-                CHECK (status IN (
-                    'QUEUED', 'PROCESSING', 'COMPLETED',
-                    'FAILED', 'CANCELLED'
-                )),
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id)
-                REFERENCES users(user_id)
-                ON DELETE RESTRICT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_queue_status_created
-            ON transaction_queue(status, created_at);
-
-        CREATE INDEX IF NOT EXISTS idx_queue_user
-            ON transaction_queue(user_id);
-    """)
-
-    conn.commit()
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
-def _current_month() -> str:
-    """Return the current UTC calendar month."""
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m")
-
-
-def _rollover_month(
-    conn: sqlite3.Connection,
-    user_id: str,
-) -> None:
-    """Reset usage when a new UTC calendar month begins."""
-    conn.execute(
-        """
-        UPDATE users
-        SET usage_count = 0, usage_month = ?
-        WHERE user_id = ? AND usage_month <> ?
-        """,
-        (_current_month(), user_id, _current_month()),
-    )
+def initialize_database(db_path: str = "data/inbound_arbitrage.db") -> None:
+    with _connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                usage_date TEXT PRIMARY KEY,
+                used INTEGER NOT NULL DEFAULT 0 CHECK (used >= 0),
+                reserved INTEGER NOT NULL DEFAULT 0 CHECK (reserved >= 0)
+            )
+        """)
 
 
-def verify_user_quota(
-    conn: sqlite3.Connection,
-    user_id: str,
-) -> Optional[Tuple[str, int, int]]:
-    """
-    Return (tier, usage_count, monthly_allowance).
-    This is an informational check, not a usage reservation.
-    """
-    try:
-        with conn:
-            _rollover_month(conn, user_id)
-            return conn.execute(
-                """
-                SELECT tier, usage_count, monthly_allowance
-                FROM users
-                WHERE user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
-    except sqlite3.Error:
-        raise
-
-
-def reserve_user_usage(
-    conn: sqlite3.Connection,
-    user_id: str,
+def reserve_daily_slot(
+    db_path: str,
+    daily_limit: int,
 ) -> bool:
-    """
-    Atomically reserve one unit of monthly quota.
-    Returns False for unknown users or exhausted allowances.
-    """
-    month = _current_month()
+    """Atomically reserve capacity for one processing request."""
+    if daily_limit < 1:
+        return False
 
-    try:
-        with conn:
-            conn.execute(
-                """
-                UPDATE users
-                SET usage_count = 0, usage_month = ?
-                WHERE user_id = ? AND usage_month <> ?
-                """,
-                (month, user_id, month),
-            )
+    day = _today()
 
-            cursor = conn.execute(
-                """
-                UPDATE users
-                SET usage_count = usage_count + 1
-                WHERE user_id = ?
-                  AND usage_count < monthly_allowance
-                """,
-                (user_id,),
-            )
-
-            return cursor.rowcount == 1
-
-    except sqlite3.Error:
-        raise
-
-
-def increment_user_usage(
-    conn: sqlite3.Connection,
-    user_id: str,
-) -> bool:
-    """
-    Backwards-compatible usage function.
-    Returns True only when quota was successfully reserved.
-    """
-    return reserve_user_usage(conn, user_id)
-
-
-def create_user(
-    conn: sqlite3.Connection,
-    user_id: str,
-    email: Optional[str] = None,
-    tier: str = "FREE",
-    monthly_allowance: int = 15,
-) -> None:
-    """Create a user explicitly; never seed production accounts."""
-    if tier not in {"FREE", "PREMIUM", "BUSINESS"}:
-        raise ValueError("Unsupported user tier.")
-
-    if monthly_allowance < 0:
-        raise ValueError("Monthly allowance cannot be negative.")
-
-    with conn:
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            """
-            INSERT INTO users (
-                user_id, email, tier, monthly_allowance
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (user_id, email, tier, monthly_allowance),
+            "INSERT OR IGNORE INTO daily_usage (usage_date) VALUES (?)",
+            (day,),
         )
+        cursor = conn.execute("""
+            UPDATE daily_usage
+            SET reserved = reserved + 1
+            WHERE usage_date = ?
+              AND used + reserved < ?
+        """, (day, daily_limit))
+
+        return cursor.rowcount == 1
 
 
-def enqueue_task(
-    conn: sqlite3.Connection,
-    task_id: str,
-    user_id: str,
-    pattern_id: str,
-) -> None:
-    """Add a task to the queue after quota is reserved."""
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO transaction_queue (
-                task_id, user_id, pattern_id
-            )
-            VALUES (?, ?, ?)
-            """,
-            (task_id, user_id, pattern_id),
-        )
+def complete_daily_slot(db_path: str) -> None:
+    """Convert one reservation into a successful request."""
+    day = _today()
+
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT reserved FROM daily_usage WHERE usage_date = ?",
+            (day,),
+        ).fetchone()
+
+        if row is None or row["reserved"] < 1:
+            raise RuntimeError("No daily usage reservation exists.")
+
+        conn.execute("""
+            UPDATE daily_usage
+            SET reserved = reserved - 1, used = used + 1
+            WHERE usage_date = ?
+        """, (day,))
+
+
+def release_daily_slot(db_path: str) -> None:
+    """Release a reservation when processing fails."""
+    day = _today()
+
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""
+            UPDATE daily_usage
+            SET reserved = reserved - 1
+            WHERE usage_date = ? AND reserved > 0
+        """, (day,))
+
+
+def get_daily_usage(db_path: str) -> dict:
+    day = _today()
+
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT used, reserved FROM daily_usage WHERE usage_date = ?",
+            (day,),
+        ).fetchone()
+
+    if row is None:
+        return {"used": 0, "reserved": 0}
+
+    return {"used": row["used"], "reserved": row["reserved"]}
