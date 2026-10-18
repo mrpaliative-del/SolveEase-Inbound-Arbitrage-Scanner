@@ -1,0 +1,48 @@
+
+name: SolveEase CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: solveease-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Compile and Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      DATABASE_PATH: ${{ runner.temp }}/solveease-ci.db
+      CORS_ORIGINS: http://localhost:8000
+      DAILY_REQUEST_LIMIT: "100"
+      PER_CLIENT_PER_MINUTE: "5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile Python
+        run: python -m compileall -q src scripts tests
+
+      - name: Run Automated Tests
+        run: python -m pytest -v tests/
