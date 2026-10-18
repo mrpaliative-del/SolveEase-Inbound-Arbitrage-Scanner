@@ -1,42 +1,30 @@
 
 import re
 
-# Limit raw input to protect the service from oversized payloads.
-MAX_PAYLOAD_BYTES = 2 * 1024 * 1024  # 2 MiB
-
-# Remove unsafe control characters while preserving tabs and line breaks
-# long enough to normalize them into spaces.
-_CONTROL_CHARS = re.compile(
-    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]"
-)
-
-_WHITESPACE = re.compile(r"\s+")
+MAX_INPUT_BYTES = 2 * 1024 * 1024
 
 
 def execute_low_level_parse(raw_payload: bytes) -> str:
-    """
-    Normalize UTF-8 text received as bytes.
-
-    This is a Python preprocessing implementation, not a WebAssembly
-    runtime or a general-purpose binary parser.
-    """
+    """Decode and normalize a bounded UTF-8 text payload."""
     if not isinstance(raw_payload, bytes):
-        raise TypeError("raw_payload must be bytes")
+        raise TypeError("Payload must be bytes.")
 
-    if len(raw_payload) > MAX_PAYLOAD_BYTES:
-        raise ValueError("Payload exceeds the 2 MiB size limit")
+    if not raw_payload:
+        raise ValueError("Payload is empty.")
+
+    if len(raw_payload) > MAX_INPUT_BYTES:
+        raise ValueError("Payload exceeds the 2 MiB limit.")
 
     try:
-        decoded_string = raw_payload.decode("utf-8", errors="strict")
+        decoded = raw_payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise ValueError(
-            "Payload is not valid UTF-8 text"
-        ) from exc
+        raise ValueError("Input must be valid UTF-8 text.") from exc
 
-    # Remove unwanted control characters.
-    cleaned_text = _CONTROL_CHARS.sub("", decoded_string)
+    # Preserve tabs and newlines until whitespace normalization.
+    decoded = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", decoded)
+    decoded = re.sub(r"[ \t\r\n]+", " ", decoded).strip()
 
-    # Normalize tabs, newlines and repeated spaces.
-    optimized_text = _WHITESPACE.sub(" ", cleaned_text).strip()
+    if not decoded:
+        raise ValueError("No usable text was found in the input.")
 
-    return optimized_text
+    return decoded
