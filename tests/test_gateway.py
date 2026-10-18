@@ -1,251 +1,152 @@
 
-import os
-import time
+import base64
+import json
 
-# app.py reads JWT_SECRET during import.
-os.environ.setdefault(
-    "JWT_SECRET",
-    "test-only-secret-that-must-never-be-used-in-production",
-)
-
-import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from src import app as gateway
-from src.database import initialize_database, create_user
+import src.app as app_module
+from src.database import get_daily_usage, initialize_database
 
 
 @pytest.fixture
-def test_context(tmp_path, monkeypatch):
-    """Create an isolated database and authenticated test client."""
-
+def client(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test.db")
-    monkeypatch.setattr(gateway, "DB_PATH", db_path)
+    monkeypatch.setattr(app_module, "DB_PATH", db_path)
+    monkeypatch.setattr(app_module, "DAILY_REQUEST_LIMIT", 100)
 
-    conn = initialize_database(db_path)
-    try:
-        create_user(
-            conn,
-            user_id="usr_free",
-            email="free-test@example.com",
-            tier="FREE",
-            monthly_allowance=15,
-        )
-        create_user(
-            conn,
-            user_id="usr_limited",
-            email="limited-test@example.com",
-            tier="FREE",
-            monthly_allowance=1,
-        )
-    finally:
-        conn.close()
+    initialize_database(db_path)
+    app_module._request_times.clear()
 
-    with TestClient(gateway.app) as client:
-        yield client, db_path
+    with TestClient(app_module.app) as test_client:
+        yield test_client, db_path
 
 
-def make_token(user_id: str) -> str:
-    """Generate a short-lived test JWT."""
-    return jwt.encode(
-        {
-            "sub": user_id,
-            "exp": int(time.time()) + 300,
-        },
-        os.environ["JWT_SECRET"],
-        algorithm="HS256",
-    )
+def encoded(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def auth_headers(user_id: str) -> dict:
+def fake_extraction(_text: str) -> dict:
     return {
-        "Authorization": f"Bearer {make_token(user_id)}"
+        "document_origin": "Sample supplier",
+        "transaction_date": "2026-10-18",
+        "calculated_net_value": 45.0,
+        "extracted_metadata_array": [
+            {"item_name": "Sample item", "unit_cost": 45.0}
+        ],
     }
 
 
-def mock_extraction(monkeypatch):
-    """Replace external inference with deterministic test output."""
-    monkeypatch.setattr(
-        gateway,
-        "map_unstructured_to_schema",
-        lambda text: {
-            "document_origin": "TEST FIXTURE",
-            "transaction_date": "",
-            "calculated_net_value": 45.0,
-            "extracted_metadata_array": [
-                {
-                    "item_name": "Test transaction",
-                    "unit_cost": 45.0,
-                }
-            ],
-        },
-    )
-
-
-def test_gateway_operational_health_route(test_context):
-    client, _ = test_context
-
-    response = client.get("/health")
+def test_health(client):
+    http, _ = client
+    response = http.get("/health")
 
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
-    assert response.json()["service"] == (
-        "SolveEase Inbound Arbitrage Scanner"
-    )
 
 
-def test_gateway_empty_payload_rejection(test_context):
-    client, _ = test_context
-
-    response = client.post(
+def test_empty_input_is_rejected(client):
+    http, _ = client
+    response = http.post(
         "/api/v1/process-task",
-        headers=auth_headers("usr_free"),
-        json={
-            "body": "   ",
-            "isBase64Encoded": False,
-        },
+        json={"body": "   ", "isBase64Encoded": False},
     )
 
     assert response.status_code == 400
 
 
-def test_gateway_rejects_missing_authentication(test_context):
-    client, _ = test_context
-
-    response = client.post(
+def test_invalid_base64_is_rejected(client):
+    http, _ = client
+    response = http.post(
         "/api/v1/process-task",
-        json={"body": "Test transaction"},
+        json={"body": "!!!", "isBase64Encoded": True},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 400
 
 
-def test_gateway_rejects_invalid_token(test_context):
-    client, _ = test_context
-
-    response = client.post(
-        "/api/v1/process-task",
-        headers={"Authorization": "Bearer invalid-token"},
-        json={"body": "Test transaction"},
+def test_successful_extraction(client, monkeypatch):
+    http, db_path = client
+    monkeypatch.setattr(
+        app_module, "map_unstructured_to_schema", fake_extraction
     )
 
-    assert response.status_code == 401
-
-
-def test_gateway_rejects_unknown_user(test_context):
-    client, _ = test_context
-
-    response = client.post(
+    response = http.post(
         "/api/v1/process-task",
-        headers=auth_headers("usr_unknown"),
-        json={"body": "Test transaction"},
-    )
-
-    assert response.status_code == 403
-
-
-def test_gateway_successful_processing_loop(
-    test_context,
-    monkeypatch,
-):
-    client, db_path = test_context
-    mock_extraction(monkeypatch)
-
-    response = client.post(
-        "/api/v1/process-task",
-        headers=auth_headers("usr_free"),
         json={
-            "body": (
-                "INBOUND STATEMENT: "
-                "$45.00 transaction completed successfully."
-            ),
-            "isBase64Encoded": False,
-        },
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["status"] == "success"
-    assert data["account_tier"] == "FREE"
-    assert data["monthly_consumption"] == 1
-    assert data["monthly_allowance"] == 15
-    assert data["payload"]["calculated_net_value"] == 45.0
-
-    conn = initialize_database(db_path)
-    try:
-        quota = conn.execute(
-            """
-            SELECT usage_count
-            FROM users
-            WHERE user_id = ?
-            """,
-            ("usr_free",),
-        ).fetchone()
-
-        assert quota == (1,)
-    finally:
-        conn.close()
-
-
-def test_gateway_rejects_invalid_base64(test_context):
-    client, db_path = test_context
-
-    response = client.post(
-        "/api/v1/process-task",
-        headers=auth_headers("usr_free"),
-        json={
-            "body": "%%%not-base64%%%",
+            "body": encoded("Supplier: Sample supplier\nItem: Sample item"),
             "isBase64Encoded": True,
         },
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 200
 
-    conn = initialize_database(db_path)
-    try:
-        usage = conn.execute(
-            "SELECT usage_count FROM users WHERE user_id = ?",
-            ("usr_free",),
-        ).fetchone()[0]
-
-        assert usage == 0
-    finally:
-        conn.close()
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["payload"]["document_origin"] == "Sample supplier"
+    assert body["payload"]["calculated_net_value"] == 45.0
+    assert body["usage"]["daily_used"] == 1
+    assert get_daily_usage(db_path)["used"] == 1
 
 
-def test_gateway_enforces_monthly_quota(
-    test_context,
-    monkeypatch,
-):
-    client, db_path = test_context
-    mock_extraction(monkeypatch)
+def test_provider_failure_releases_reservation(client, monkeypatch):
+    http, db_path = client
 
-    headers = auth_headers("usr_limited")
-    payload = {"body": "Test transaction"}
+    def fail(_text):
+        raise RuntimeError("simulated provider failure")
 
-    first = client.post(
+    monkeypatch.setattr(app_module, "map_unstructured_to_schema", fail)
+
+    response = http.post(
         "/api/v1/process-task",
-        headers=headers,
-        json=payload,
+        json={"body": encoded("Example document"), "isBase64Encoded": True},
     )
-    second = client.post(
-        "/api/v1/process-task",
-        headers=headers,
-        json=payload,
+
+    assert response.status_code == 502
+
+    usage = get_daily_usage(db_path)
+    assert usage["used"] == 0
+    assert usage["reserved"] == 0
+
+
+def test_daily_limit_is_enforced(client, monkeypatch):
+    http, db_path = client
+    monkeypatch.setattr(app_module, "DAILY_REQUEST_LIMIT", 1)
+    monkeypatch.setattr(
+        app_module, "map_unstructured_to_schema", fake_extraction
     )
+
+    request_body = {
+        "body": encoded("Example document"),
+        "isBase64Encoded": True,
+    }
+
+    first = http.post("/api/v1/process-task", json=request_body)
+    second = http.post("/api/v1/process-task", json=request_body)
 
     assert first.status_code == 200
     assert second.status_code == 429
+    assert get_daily_usage(db_path)["used"] == 1
 
-    conn = initialize_database(db_path)
-    try:
-        usage = conn.execute(
-            "SELECT usage_count FROM users WHERE user_id = ?",
-            ("usr_limited",),
-        ).fetchone()[0]
 
-        assert usage == 1
-    finally:
-        conn.close()
+def test_usage_endpoint(client):
+    http, _ = client
+    response = http.get("/api/v1/usage")
+
+    assert response.status_code == 200
+    assert response.json()["daily_used"] == 0
+
+
+def test_plain_text_payload(client, monkeypatch):
+    http, _ = client
+    monkeypatch.setattr(
+        app_module, "map_unstructured_to_schema", fake_extraction
+    )
+
+    response = http.post(
+        "/api/v1/process-task",
+        json={"body": "Supplier: Example", "isBase64Encoded": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
